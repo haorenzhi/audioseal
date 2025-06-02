@@ -18,4 +18,4 @@ __version__ = "0.1.4"
 
 from audioseal import builder
 from audioseal.loader import AudioSeal
-from audioseal.models import AudioSealDetector, AudioSealWM, MsgProcessor
+from audioseal.models import AudioSealDetector, AudioSealWM, MsgProcessor, UltrasoundEmbedding

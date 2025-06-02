@@ -22,6 +22,40 @@ sample_rate = your_sample_rate
 """
 
 
+class UltrasoundEmbedding(torch.nn.Module):
+    """
+    A module that embeds ultrasound features into the watermarking model.
+    Args:
+        hidden_size: The dimension of the ultrasound features
+        nbits: The number of bits in the secret message
+        encoder_ultrasound: A module that encodes the ultrasound features
+    """
+
+    def __init__(self, hidden_size: int, nbits: int, encoder_ultrasound: torch.nn.Module):
+        super().__init__()
+        self.encoder_ultrasound = encoder_ultrasound
+        self.embedding = torch.nn.Sequential(
+            torch.nn.Conv1d(hidden_size, 64, kernel_size=3, padding=1), # [batch, 64, frames]
+            torch.nn.ReLU(), # [batch, 64, frames]
+            torch.nn.BatchNorm1d(64), # [batch, 64, frames]
+            torch.nn.AdaptiveAvgPool1d(1),  # [batch, 64, 1]
+            torch.nn.Flatten(),             # [batch, 64]
+            torch.nn.Linear(64, nbits),     # [batch, nbits]
+            torch.nn.Sigmoid()              # binary output [batch, nbits]
+        )
+
+    def forward(self, ultrasound_features: torch.Tensor) -> torch.Tensor:
+        """
+        Embed the ultrasound features into the watermarking model.
+        Args:
+            x: Ultrasound features, size: batch x hidden x frames
+        """
+        device = next(self.encoder_ultrasound.parameters()).device
+        ultrasound_features = ultrasound_features.to(device)
+        msg_encoded = self.encoder_ultrasound(ultrasound_features)
+        return self.embedding(msg_encoded)
+
+
 class MsgProcessor(torch.nn.Module):
     """
     Apply the secret message to the encoder output.
@@ -36,6 +70,17 @@ class MsgProcessor(torch.nn.Module):
         self.nbits = nbits
         self.hidden_size = hidden_size
         self.msg_processor = torch.nn.Embedding(2 * nbits, hidden_size)
+        # self.encoder_ultrasound = encoder_ultrasound
+        # self.ultrasound_encoder = torch.nn.Sequential(
+        #     torch.nn.Conv1d(hidden_size, 64, kernel_size=3, padding=1), # [batch, 64, frames]
+        #     torch.nn.ReLU(), # [batch, 64, frames]
+        #     torch.nn.BatchNorm1d(64), # [batch, 64, frames]
+        #     torch.nn.AdaptiveAvgPool1d(1),  # [batch, 64, 1]
+        #     torch.nn.Flatten(),             # [batch, 64]
+        #     torch.nn.Linear(64, nbits),     # [batch, nbits]
+        #     torch.nn.Sigmoid()              # binary output [batch, nbits]
+        # )
+
 
     def forward(self, hidden: torch.Tensor, msg: torch.Tensor) -> torch.Tensor:
         """
@@ -44,6 +89,9 @@ class MsgProcessor(torch.nn.Module):
             hidden: The encoder output, size: batch x hidden x frames
             msg: The secret message, size: batch x k
         """
+        # print(
+        #     f"MsgProcessor: hidden {hidden.shape}, msg {msg.shape}, nbits {self.nbits}"
+        # )
         # create indices to take from embedding layer
         indices = 2 * torch.arange(msg.shape[-1]).to(msg.device)  # k: 0 2 4 ... 2k
         indices = indices.repeat(msg.shape[0], 1)  # b x k
@@ -67,6 +115,7 @@ class AudioSealWM(torch.nn.Module):
         encoder: torch.nn.Module,
         decoder: torch.nn.Module,
         msg_processor: Optional[torch.nn.Module] = None,
+        ultrasound_embedding: Optional[torch.nn.Module] = None,
     ):
         super().__init__()
         self.encoder = encoder
@@ -74,6 +123,7 @@ class AudioSealWM(torch.nn.Module):
         # The build should take care of validating the dimensions between component
         self.msg_processor = msg_processor
         self._message: Optional[torch.Tensor] = None
+        self.ultrasound_embedding = ultrasound_embedding
 
     @property
     def message(self) -> Optional[torch.Tensor]:
@@ -130,6 +180,19 @@ class AudioSealWM(torch.nn.Module):
 
         return watermark[..., :length]  # trim output cf encodec codebase
 
+    def embed_message(
+        self,
+        ultrasound_features: torch.Tensor
+        ) -> torch.Tensor:
+        """
+        Embed the ultrasound features into the watermarking model.
+        Args:
+            ultrasound_features: The ultrasound features to embed, size: batch x hidden x frames
+        """
+        if self.ultrasound_embedding is None:
+            raise ValueError("Ultrasound embedding is not set.")
+        return self.ultrasound_embedding(ultrasound_features)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -141,6 +204,8 @@ class AudioSealWM(torch.nn.Module):
         if sample_rate is None:
             logger.warning(COMPATIBLE_WARNING)
             sample_rate = 16_000
+        breakpoint()
+        message = self.embed_message(message)
         wm = self.get_watermark(x, sample_rate=sample_rate, message=message)
         return x + alpha * wm
 
